@@ -1,6 +1,6 @@
 {
-  "name": "vite-tool",
-  "compatibility_date": "2026-10-01",
+  "name": "vitejs-vite-kjuurhak",
+  "compatibility_date": "2026-01-01",
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"
