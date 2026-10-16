@@ -1373,7 +1373,8 @@ export default function App() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-black text-emerald-600">
-              🏢 水電標單雲端共用系統 <span className="text-xs bg-indigo-600 text-white px-2 py-0.5 rounded ml-2">🧠 全活頁簿多頁籤智配版</span>
+              🏢 昇億公司git pull --rebase origin main
+git status專用系統 <span className="text-xs bg-indigo-600 text-white px-2 py-0.5 rounded ml-2">全活頁簿多頁籤智配版</span>
             </h1>
             <p className="text-xs text-slate-400 mt-1">支援多工作表自動辨識、批次跨表智配、多頁籤覆核面板與一鍵整本 Excel 活頁簿回填匯出。</p>
           </div>
