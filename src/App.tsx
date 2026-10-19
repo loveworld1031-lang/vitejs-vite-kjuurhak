@@ -796,11 +796,18 @@ export default function App() {
 
       let targetDesc = '';
       let forcedTag = '';
-      if (localMemory[lookupKey]) {
+      if (cloudMemoryLib[lookupKey]) {
+        const rawCloudVal = cloudMemoryLib[lookupKey];
+        if (rawCloudVal.includes('|||')) {
+          const [cTag, cDesc] = rawCloudVal.split('|||');
+          forcedTag = cTag;
+          targetDesc = cDesc;
+        } else {
+          targetDesc = rawCloudVal;
+        }
+      } else if (localMemory[lookupKey]) {
         targetDesc = localMemory[lookupKey].description;
         forcedTag = localMemory[lookupKey].item_tag;
-      } else if (cloudMemoryLib[lookupKey]) {
-        targetDesc = cloudMemoryLib[lookupKey];
       }
 
       if (targetDesc) {
@@ -987,21 +994,24 @@ export default function App() {
     return results;
   };
 
+  const upsertCloudMemory = async (rows: { client_name: string; matched_description: string }[]) => {
+    if (!rows || rows.length === 0) return;
+    try {
+      const { error } = await supabase.from('learning_memory').upsert(rows, { onConflict: 'client_name' });
+      if (error) {
+        await supabase.from('learning_memory').upsert(rows);
+      }
+    } catch (e) {
+      console.warn('雲端記憶同步略過:', e);
+    }
+  };
+
   const handleStartMatching = async () => {
     if (selectedSheets.length === 0 || productDB.length === 0) return;
     setIsProcessing(true);
     setStatusMessage('⚡ 正在同步調取雲端與地端記憶，執行全活頁簿多工作表智慧比對...');
 
     try {
-      const { data: cloudMemory, error: memError } = await supabase.from('learning_memory').select('client_name, matched_description');
-      const cloudMemoryLib: { [key: string]: string } = {};
-      if (!memError && cloudMemory) {
-        cloudMemory.forEach((row: any) => {
-          const cleanKey = normalizeSpec(row.client_name).cleanText;
-          if (cleanKey) cloudMemoryLib[cleanKey] = row.matched_description;
-        });
-      }
-
       let localMemory: { [key: string]: MemoryPayload } = {};
       try {
         const stored = localStorage.getItem('optimized_learning_memory');
@@ -1013,6 +1023,44 @@ export default function App() {
         const storedP = localStorage.getItem('optimized_pattern_learning_memory');
         if (storedP) patternMemory = JSON.parse(storedP);
       } catch (e) {}
+
+      const { data: cloudMemory, error: memError } = await supabase
+        .from('learning_memory')
+        .select('client_name, matched_description')
+        .limit(5000);
+      const cloudMemoryLib: { [key: string]: string } = {};
+      if (!memError && cloudMemory) {
+        cloudMemory.forEach((row: any) => {
+          const rawClientName = String(row.client_name || '').trim();
+          const rawMatchedDesc = String(row.matched_description || '').trim();
+          if (!rawClientName || !rawMatchedDesc) return;
+
+          if (rawClientName.startsWith('__PATTERN__:')) {
+            const pKey = rawClientName.slice('__PATTERN__:'.length);
+            try {
+              const parsedRule = JSON.parse(rawMatchedDesc);
+              if (pKey && parsedRule && typeof parsedRule === 'object') {
+                patternMemory[pKey] = parsedRule;
+              }
+            } catch (e) {}
+          } else {
+            const cleanKey = normalizeSpec(rawClientName).cleanText;
+            if (cleanKey) {
+              cloudMemoryLib[cleanKey] = rawMatchedDesc;
+              if (rawMatchedDesc === 'REMOVE_MAPPING') {
+                localMemory[cleanKey] = { description: 'REMOVE_MAPPING', item_tag: 'otherProductDiscount' };
+              } else if (rawMatchedDesc.includes('|||')) {
+                const [cTag, cDesc] = rawMatchedDesc.split('|||');
+                localMemory[cleanKey] = { description: cDesc, item_tag: cTag };
+              }
+            }
+          }
+        });
+        try {
+          localStorage.setItem('optimized_learning_memory', JSON.stringify(localMemory));
+          localStorage.setItem('optimized_pattern_learning_memory', JSON.stringify(patternMemory));
+        } catch (e) {}
+      }
 
       const newResultsMap: { [sheetName: string]: MatchResult[] } = {};
 
@@ -1121,7 +1169,7 @@ export default function App() {
       setAllSheetResults((prev) => ({ ...prev, [activeSheetTab]: nextResults }));
       localMemory[cleanLookupKey] = { description: 'REMOVE_MAPPING', item_tag: 'otherProductDiscount' };
       localStorage.setItem('optimized_learning_memory', JSON.stringify(localMemory));
-      await supabase.from('learning_memory').upsert({ client_name: target.clientName.trim(), matched_description: 'REMOVE_MAPPING' });
+      await upsertCloudMemory([{ client_name: target.clientName.trim(), matched_description: 'REMOVE_MAPPING' }]);
     } else {
       const targetId = Number(selectedIdStr);
       const found = productDB.find((c: DBItem) => c.id === targetId);
@@ -1131,7 +1179,10 @@ export default function App() {
         
         localMemory[cleanLookupKey] = { description: found.description, item_tag: found.item_tag };
         localStorage.setItem('optimized_learning_memory', JSON.stringify(localMemory));
-        await supabase.from('learning_memory').upsert({ client_name: target.clientName.trim(), matched_description: found.description });
+
+        const cloudPayloads: { client_name: string; matched_description: string }[] = [
+          { client_name: target.clientName.trim(), matched_description: `${found.item_tag}|||${found.description}` },
+        ];
 
         const skeletonKey = extractPatternSkeleton(target.clientName);
         if (skeletonKey && skeletonKey.length >= 3) {
@@ -1142,15 +1193,21 @@ export default function App() {
           } catch (e) {}
 
           const dbSkeleton = extractPatternSkeleton(found.description);
-          patternMemory[skeletonKey] = {
+          const newRule: PatternMemoryPayload = {
             patternKey: skeletonKey,
             seriesPrefix: dbSkeleton,
             itemTag: found.item_tag,
             productType: found.product_type,
             brand: found.brand,
           };
+          patternMemory[skeletonKey] = newRule;
           localStorage.setItem('optimized_pattern_learning_memory', JSON.stringify(patternMemory));
+          cloudPayloads.push({
+            client_name: `__PATTERN__:${skeletonKey}`,
+            matched_description: JSON.stringify(newRule),
+          });
         }
+        await upsertCloudMemory(cloudPayloads);
       }
     }
   };
@@ -1259,19 +1316,27 @@ export default function App() {
             const cleanKey = normalizeSpec(item.clientName).cleanText;
             if (cleanKey && item.matchedDescription) {
               localMemory[cleanKey] = { description: item.matchedDescription, item_tag: item.itemTag };
-              cloudUpsertPayloads.push({ client_name: item.clientName.trim(), matched_description: item.matchedDescription });
+              cloudUpsertPayloads.push({
+                client_name: item.clientName.trim(),
+                matched_description: `${item.itemTag}|||${item.matchedDescription}`,
+              });
 
               const skeletonKey = extractPatternSkeleton(item.clientName);
               if (skeletonKey && skeletonKey.length >= 3) {
                 const dbSkeleton = extractPatternSkeleton(item.matchedDescription);
                 const foundDbItem = productDB.find((c: DBItem) => c.id === Number(item.matchedId));
-                patternMemory[skeletonKey] = {
+                const newRule: PatternMemoryPayload = {
                   patternKey: skeletonKey,
                   seriesPrefix: dbSkeleton,
                   itemTag: item.itemTag,
                   productType: foundDbItem?.product_type,
                   brand: foundDbItem?.brand,
                 };
+                patternMemory[skeletonKey] = newRule;
+                cloudUpsertPayloads.push({
+                  client_name: `__PATTERN__:${skeletonKey}`,
+                  matched_description: JSON.stringify(newRule),
+                });
               }
             }
           });
@@ -1313,19 +1378,27 @@ export default function App() {
             const cleanKey = normalizeSpec(item.clientName).cleanText;
             if (cleanKey && item.matchedDescription) {
               localMemory[cleanKey] = { description: item.matchedDescription, item_tag: item.itemTag };
-              cloudUpsertPayloads.push({ client_name: item.clientName.trim(), matched_description: item.matchedDescription });
+              cloudUpsertPayloads.push({
+                client_name: item.clientName.trim(),
+                matched_description: `${item.itemTag}|||${item.matchedDescription}`,
+              });
 
               const skeletonKey = extractPatternSkeleton(item.clientName);
               if (skeletonKey && skeletonKey.length >= 3) {
                 const dbSkeleton = extractPatternSkeleton(item.matchedDescription);
                 const foundDbItem = productDB.find((c: DBItem) => c.id === Number(item.matchedId));
-                patternMemory[skeletonKey] = {
+                const newRule: PatternMemoryPayload = {
                   patternKey: skeletonKey,
                   seriesPrefix: dbSkeleton,
                   itemTag: item.itemTag,
                   productType: foundDbItem?.product_type,
                   brand: foundDbItem?.brand,
                 };
+                patternMemory[skeletonKey] = newRule;
+                cloudUpsertPayloads.push({
+                  client_name: `__PATTERN__:${skeletonKey}`,
+                  matched_description: JSON.stringify(newRule),
+                });
               }
             }
           });
@@ -1340,11 +1413,7 @@ export default function App() {
 
       if (cloudUpsertPayloads.length > 0) {
         const uniquePayloads = Array.from(new Map(cloudUpsertPayloads.map((p) => [p.client_name, p])).values());
-        try {
-          await supabase.from('learning_memory').upsert(uniquePayloads);
-        } catch (dbErr) {
-          console.warn('雲端記憶同步略過:', dbErr);
-        }
+        await upsertCloudMemory(uniquePayloads);
       }
 
       // 將所有工作表的項目狀態標記為 MEMORY
