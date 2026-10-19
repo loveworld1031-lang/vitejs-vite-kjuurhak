@@ -9,56 +9,69 @@ import { supabase } from './supabaseClient';
 function normalizeSpec(text: string): { cleanText: string; sizeTags: string[] } {
   if (!text) return { cleanText: '', sizeTags: [] };
 
-  // 🚀 先行將 Unicode 上標 ² 轉為 2，並移除多餘空白
-  let clean = text.toLowerCase().replace(/²/g, '2').replace(/[\s\t\n\r]/g, '');
+  // 🚀 先行將 Unicode 上標 ² 轉為 2、全形/彎引號轉為標準半形 "，並移除多餘空白
+  let clean = text.toLowerCase().replace(/²/g, '2').replace(/[”″“]/g, '"').replace(/[\s\t\n\r]/g, '');
   let sizeTags: string[] = [];
 
-  // 【A. 電線電纜截面積標準化】(mm2, mm², m㎡, SQ, 平方 ➡️ sq)
+  // 【A. 電線電纜截面積與單芯線徑標準化】(mm2, mm², m㎡, SQ, 平方 ➡️ sq)
   const sqRegex = /(\d+(?:\.\d+)?)\s*(?:mm2|m㎡|sq|平方(?:公厘)?)/i;
   const sqMatch = clean.match(sqRegex);
   if (sqMatch) {
     sizeTags.push(`${sqMatch[1]}sq`);
+  } else {
+    const wireMmMatch = clean.match(/(?:^|\D)(1\.2|1\.6|2\.0|2\.6|3\.2)\s*mm(?!2)/i);
+    if (wireMmMatch) {
+      sizeTags.push(`${ parseFloat(wireMmMatch[1]) }mm_wire`);
+    }
   }
 
-  // 【B & C. 支援異徑/多維度尺寸擷取】
-  const inchRegex = /(\d+(?:\.\d+)?)\s*(?:"|吋|inch|φ|ф)/gi;
-  const matches = [...clean.matchAll(inchRegex)];
+  // 【B & C. 支援異徑/多維度尺寸擷取（先將帶分數與常見分數轉為小數，避免 1/2" 被誤判為 2"）】
+  let inchWorkText = clean
+    .replace(/3[-_]1\/2/g, '3.5')
+    .replace(/2[-_]1\/2/g, '2.5')
+    .replace(/1[-_]3\/4/g, '1.75')
+    .replace(/1[-_]1\/2/g, '1.5')
+    .replace(/1[-_]1\/4/g, '1.25')
+    .replace(/(?<!\d)3\/8/g, '0.375')
+    .replace(/(?<!\d)1\/4/g, '0.25')
+    .replace(/(?<!\d)1\/2/g, '0.5')
+    .replace(/(?<!\d)3\/4/g, '0.75');
+
+  const inchRegex = /(?<![/\d])(\d+(?:\.\d+)?)\s*(?:b)?\s*(?:"|吋|inch|φ|ф)/gi;
+  const matches = [...inchWorkText.matchAll(inchRegex)];
 
   if (matches.length > 0) {
-    matches.forEach((m) => sizeTags.push(`${m[1]}inch`));
+    matches.forEach((m) => sizeTags.push(`${parseFloat(m[1])}inch`));
   } else {
     // 【常規分數與水電代碼備援】
-    let fractionText = clean;
-    if (fractionText.includes('1/2')) fractionText = fractionText.replace(/1[-_]1\/2/g, '1.5');
-    if (fractionText.includes('3/4')) fractionText = fractionText.replace(/1[-_]3\/4/g, '1.75');
-    if (fractionText.includes('1/4')) fractionText = fractionText.replace(/1[-_]1\/4/g, '1.25');
-
+    let fractionText = inchWorkText;
     const fractionInchRegex = /(\d+)\s*\/\s*(\d+)\s*(?:"|吋|inch)?/i;
     const fractionMatch = fractionText.match(fractionInchRegex);
     if (fractionMatch) {
       const decimal = parseInt(fractionMatch[1], 10) / parseInt(fractionMatch[2], 10);
       sizeTags.push(`${decimal}inch`);
     } else {
-      const fenRegex = /(\d+)分(?!之)/;
+      const fenRegex = /(\d+)分(?!之|鐘)/;
       const fenMatch = fractionText.match(fenRegex);
       if (fenMatch) {
         const decimal = parseInt(fenMatch[1], 10) / 8;
         sizeTags.push(`${decimal}inch`);
-      } else if (/(?:^|\D)(?:300mm|300a|12吋|12")(?:$|\D)/i.test(clean)) sizeTags.push('12inch');
-      else if (/(?:^|\D)(?:250mm|250a|10吋|10")(?:$|\D)/i.test(clean)) sizeTags.push('10inch');
-      else if (/(?:^|\D)(?:200mm|200a|a200|8吋|8")(?:$|\D)/i.test(clean)) sizeTags.push('8inch');
-      else if (/(?:^|\D)(?:150mm|150a|w150|a150|6吋|6")(?:$|\D)/i.test(clean)) sizeTags.push('6inch');
-      else if (/(?:^|\D)(?:125mm|125a|w125|a125|5吋|5")(?:$|\D)/i.test(clean)) sizeTags.push('5inch');
-      else if (/(?:^|\D)(?:100mm|100a|e100|w100|a100|b100|4吋|4")(?:$|\D)/i.test(clean)) sizeTags.push('4inch');
-      else if (/(?:^|\D)(?:75mm|77mm|80mm|80a|e80|w80|a80|b80|3吋|3")(?:$|\D)/i.test(clean)) sizeTags.push('3inch');
-      else if (/(?:^|\D)(?:65mm|65a|e65|w65|a65|b65|2-1\/2|2\.5)(?:$|\D)/i.test(clean) || clean.includes('2-1/2')) sizeTags.push('2.5inch');
-      else if (/(?:^|\D)(?:50mm|52mm|50a|e52|w52|w50|a50|b50|2吋|2")(?:$|\D)/i.test(clean)) sizeTags.push('2inch');
-      else if (/(?:^|\D)(?:40mm|41mm|42mm|40a|e41|w41|w40|1-1\/2|1\.5|吋半)(?:$|\D)/i.test(clean) || clean.includes('1-1/2') || clean.includes('吋半')) sizeTags.push('1.5inch');
-      else if (/(?:^|\D)(?:32mm|35mm|32a|e35|w35|w32|1-1\/4|1\.25)(?:$|\D)/i.test(clean) || clean.includes('1-1/4')) sizeTags.push('1.25inch');
-      else if (/(?:^|\D)(?:25mm|28mm|25a|e28|w28|w25|1吋|1")(?:$|\D)/i.test(clean)) sizeTags.push('1inch');
-      else if (/(?:^|\D)(?:20mm|22mm|20a|e20|w20|3\/4)(?:$|\D)/i.test(clean) || clean.includes('3/4')) sizeTags.push('0.75inch');
-      else if (/(?:^|\D)(?:15mm|16mm|15a|16a|e16|w16|1\/2)(?:$|\D)/i.test(clean) || clean.includes('1/2')) sizeTags.push('0.5inch');
-      else if (/(?:^|\D)(?:13mm|13a|w13|3\/8)(?:$|\D)/i.test(clean) || clean.includes('3/8')) sizeTags.push('0.375inch');
+      } else if (/(?:^|\D)(?:300mm|300a|12吋|12")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('12inch');
+      else if (/(?:^|\D)(?:250mm|250a|10吋|10")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('10inch');
+      else if (/(?:^|\D)(?:200mm|200a|a200|8吋|8")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('8inch');
+      else if (/(?:^|\D)(?:150mm|150a|w150|a150|6吋|6")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('6inch');
+      else if (/(?:^|\D)(?:125mm|125a|w125|a125|5吋|5")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('5inch');
+      else if (/(?:^|\D)(?:100mm|100a|e100|w100|a100|b100|4吋|4")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('4inch');
+      else if (/(?:^|\D)(?:75mm|77mm|80mm|80a|e80|w80|a80|b80|3吋|3")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('3inch');
+      else if (/(?:^|\D)(?:65mm|65a|e65|w65|a65|b65|2-1\/2|2\.5)(?:$|\D)/i.test(inchWorkText) || clean.includes('2-1/2')) sizeTags.push('2.5inch');
+      else if (/(?:^|\D)(?:50mm|52mm|50a|e52|w52|w50|a50|b50|2吋|2")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('2inch');
+      else if (/(?:^|\D)(?:40mm|41mm|42mm|40a|e41|w41|w40|1-1\/2|1\.5|吋半)(?:$|\D)/i.test(inchWorkText) || clean.includes('1-1/2') || clean.includes('吋半')) sizeTags.push('1.5inch');
+      else if (/(?:^|\D)(?:32mm|35mm|32a|e35|w35|w32|1-1\/4|1\.25)(?:$|\D)/i.test(inchWorkText) || clean.includes('1-1/4')) sizeTags.push('1.25inch');
+      else if (/(?:^|\D)(?:25mm|28mm|25a|e28|w28|w25|1吋|1")(?:$|\D)/i.test(inchWorkText)) sizeTags.push('1inch');
+      else if (/(?:^|\D)(?:20mm|22mm|20a|e20|w20|3\/4|0\.75)(?:$|\D)/i.test(inchWorkText) || clean.includes('3/4')) sizeTags.push('0.75inch');
+      else if (/(?:^|\D)(?:15mm|16mm|15a|16a|e16|w16|1\/2|0\.5)(?:$|\D)/i.test(inchWorkText) || clean.includes('1/2')) sizeTags.push('0.5inch');
+      else if (/(?:^|\D)(?:10mm|10a|13mm|13a|w13|3\/8|0\.375)(?:$|\D)/i.test(inchWorkText) || clean.includes('3/8')) sizeTags.push('0.375inch');
+      else if (/(?:^|\D)(?:8mm|8a|1\/4|0\.25)(?:$|\D)/i.test(inchWorkText) || clean.includes('1/4')) sizeTags.push('0.25inch');
     }
   }
 
@@ -73,14 +86,15 @@ function normalizeSpec(text: string): { cleanText: string; sizeTags: string[] } 
 // ==========================================
 function extractPatternSkeleton(text: string): string {
   if (!text) return '';
-  let clean = text.toLowerCase().replace(/²/g, '2').replace(/[\s\t\n\r]/g, '');
+  let clean = text.toLowerCase().replace(/²/g, '2').replace(/[”″“]/g, '"').replace(/[\s\t\n\r]/g, '');
   // 移除電線電纜截面積 (如 5.5mm2, 14sq, 250mm2, 5.5平方)
   clean = clean.replace(/(\d+(?:\.\d+)?)\s*(?:mm2|m㎡|sq|平方(?:公厘)?)/gi, '');
-  // 移除吋/分數/公稱直徑尺寸 (如 1/2", 3/4", 2", 1-1/2")
-  clean = clean.replace(/(\d+(?:\.\d+)?)\s*(?:"|吋|inch|φ|ф)/gi, '');
-  clean = clean.replace(/\d+\s*\/\s*\d+\s*(?:"|吋|inch)?/gi, '');
-  clean = clean.replace(/\d+分(?!之)/gi, '');
-  clean = clean.replace(/\b(65mm|65a|42mm|40a|35mm|32a|16mm|16a|15a|22mm|20a|28mm|25a|52mm|50a|77mm|80a|100mm|100a)\b/gi, '');
+  // 移除帶分數/分數/吋/公稱直徑尺寸 (如 1-1/2", 1/2", 3/4", 2")
+  clean = clean.replace(/\d+[-_]\d+\s*\/\s*\d+\s*(?:b)?\s*(?:"|吋|inch)?/gi, '');
+  clean = clean.replace(/\d+\s*\/\s*\d+\s*(?:b)?\s*(?:"|吋|inch)?/gi, '');
+  clean = clean.replace(/(\d+(?:\.\d+)?)\s*(?:b)?\s*(?:"|吋|inch|φ|ф)/gi, '');
+  clean = clean.replace(/\d+分(?!之|鐘)/gi, '');
+  clean = clean.replace(/\b(8mm|8a|10mm|10a|13mm|13a|15mm|15a|16mm|16a|20mm|20a|22mm|25mm|25a|28mm|32mm|32a|35mm|40mm|40a|41mm|42mm|50mm|50a|52mm|65mm|65a|75mm|77mm|80mm|80a|90mm|90a|100mm|100a|125mm|125a|150mm|150a|200mm|200a|250mm|250a|300mm|300a)\b/gi, '');
   // 移除多餘分隔符號
   clean = clean.replace(/[，,_\-/#*()（）]/g, '');
   return clean;
@@ -109,9 +123,16 @@ function resolveDbSizeTags(dbRow: DBItem): string[] {
 // ==========================================
 function extractCoreCountTag(text: string): string {
   if (!text) return '';
-  const t = text.toLowerCase().replace(/[\s\t\n\r]/g, '');
+  const t = text.toLowerCase().replace(/²/g, '2').replace(/[\s\t\n\r]/g, '');
+  if (/(單芯|單心|一芯|一心)/.test(t)) return '1c';
+  if (/(二芯|二心|兩芯|兩心)/.test(t)) return '2c';
+  if (/(三芯|三心)/.test(t)) return '3c';
+  if (/(四芯|四心)/.test(t)) return '4c';
   const m = t.match(/(\d+)\s*(?:\/c|\/?c\b|芯|心)/i);
-  return m ? `${m[1]}c` : '';
+  if (m) return `${m[1]}c`;
+  const multMatch = t.match(/(?:^|[^\d.])([1234])\s*[x×*]\s*\d+(?:\.\d+)?\s*(?:mm2|m㎡|sq|平方)/i);
+  if (multMatch) return `${multMatch[1]}c`;
+  return '';
 }
 
 function resolveDbCoreCountTag(dbRow: DBItem): string {
@@ -129,8 +150,8 @@ function resolveDbCoreCountTag(dbRow: DBItem): string {
 // 1e. 材質比對
 // ==========================================
 const MATERIAL_KEYWORDS = [
-  '鑄鐵', '白鐵', '不鏽鋼', 'sus304', 'sus316', '青銅', '砲金銅', '黃銅',
-  '紅銅', '碳鋼', '鍍鋅', '塑鋼', 'pvc', 'pe', 'upvc', 'cpvc',
+  '鑄鐵', '白鐵', '不鏽鋼', '不銹鋼', 'sus304', 'sus316', '青銅', '砲金銅', '鉋金銅', '黃銅',
+  '紅銅', '碳鋼', '鍍鋅', '塑鋼', 'abs', 'cpvc', 'upvc', 'pvc', 'pe',
   'xlpe', '耐火', '耐燃', '耐熱', 'fr'
 ];
 
@@ -141,10 +162,11 @@ function extractMaterialTag(text: string): string {
   if (/(耐火|耐燃|fr\.c|\bfr\b)/.test(t)) return '耐燃';
   if (/耐熱/.test(t)) return '耐熱';
   if (/(pvc|聚氯乙烯)/.test(t)) return 'PVC';
-  if (/(砲金銅|青銅)/.test(t)) return '砲金銅';
+  if (/(砲金銅|鉋金銅|青銅)/.test(t)) return '砲金銅';
   if (/鑄鐵/.test(t)) return '鑄鐵';
   if (/(鍍鋅|gip|stpg)/.test(t)) return '鍍鋅鋼';
-  if (/(白鐵|不鏽鋼|sus304|sus316)/.test(t)) return '不鏽鋼';
+  if (/(白鐵|不鏽鋼|不銹鋼|sus304|sus316)/.test(t)) return '不鏽鋼';
+  if (/(塑鋼|\babs\b)/.test(t)) return '塑鋼';
   for (const m of MATERIAL_KEYWORDS) {
     if (t.includes(m)) return m;
   }
@@ -184,9 +206,14 @@ function extractProductSubTypeTag(text: string): string {
   if (/gip|cns6445/.test(t)) return 'GIP';
   if (/閘閥|閘門閥/.test(t)) return '閘閥';
   if (/球塞閥|球塞/.test(t)) return '球塞閥';
+  if (/蝶閥|蝶型閥/.test(t)) return '蝶閥';
+  if (/球型閥/.test(t)) return '球型閥';
   if (/y型過濾器|過濾器/.test(t)) return 'Y型過濾器';
   if (/逆止閥|逆止/.test(t)) return '逆止閥';
   if (/底閥/.test(t)) return '底閥';
+  if (/電磁閥/.test(t)) return '電磁閥';
+  if (/水錘吸收器/.test(t)) return '水錘吸收器';
+  if (/釋氣閥/.test(t)) return '自動釋氣閥';
   return '';
 }
 
@@ -551,7 +578,8 @@ export default function App() {
       try {
         const { data, error } = await supabase
           .from('price_db')
-          .select('id, item_tag, description, list_price, keywords, brand, material, product_type, size_spec, unit');
+          .select('id, item_tag, description, list_price, keywords, brand, material, product_type, size_spec, unit')
+          .limit(5000);
         if (error) throw error;
         if (data && data.length > 0) {
           const standardizedDB = transformRawData(data as unknown as CloudRawItem[]);
@@ -860,13 +888,15 @@ export default function App() {
         const dbCoreTag = resolveDbCoreCountTag(dbRow);
         if (clientCoreTag && dbCoreTag) {
           coreCountBonus = clientCoreTag === dbCoreTag ? 35 : -45;
+        } else if (!clientCoreTag && dbCoreTag) {
+          coreCountBonus = dbCoreTag === '1c' ? 15 : -10;
         }
 
         const dbMaterialTag = resolveDbMaterialTag(dbRow);
         if (clientMaterialTag && dbMaterialTag && clientMaterialTag !== dbMaterialTag) continue;
         const materialBonus = clientMaterialTag && dbMaterialTag ? 45 : 0;
 
-        const dbSubType = dbRow.product_type || extractProductSubTypeTag(dbRow.item_tag) || extractProductSubTypeTag(dbRow.description) || extractProductSubTypeTag(dbRow.keywords);
+        const dbSubType = extractProductSubTypeTag(dbRow.product_type || '') || extractProductSubTypeTag(dbRow.item_tag) || extractProductSubTypeTag(dbRow.description) || extractProductSubTypeTag(dbRow.keywords) || dbRow.product_type || '';
         let subTypeBonus = 0;
         if (clientSubType && dbSubType) {
           subTypeBonus = clientSubType === dbSubType ? 50 : -80;
@@ -902,7 +932,7 @@ export default function App() {
           if (normKw && clientNorm.cleanText.indexOf(normKw) !== -1) {
             matchCount++;
             if (kwNorm.sizeTags.length === 0 && !isGenericRatingCode(normKw)) meaningfulMatchCount++;
-            if (/(橘色|排水|廢水|給水|灰色|e管|b管|絕緣|電力電纜|耐熱|閘閥|球塞|過濾器|逆止|底閥)/.test(normKw)) coreFeatureBonus += 20;
+            if (/(橘色|排水|廢水|給水|灰色|e管|b管|絕緣|電力電纜|耐熱|閘閥|球塞|球型閥|蝶閥|蝶型閥|過濾器|逆止|底閥|水錘|釋氣閥)/.test(normKw)) coreFeatureBonus += 20;
           }
         });
 
